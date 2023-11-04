@@ -8,6 +8,7 @@ import { QueryClient, QueryClientProvider } from "react-query";
 import { ReactQueryDevtools } from "react-query/devtools";
 import { theme } from "~/theme";
 import { worker } from "./mocks/browser";
+import axios from "axios";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -19,6 +20,19 @@ const queryClient = new QueryClient({
 //   const { worker } = await import("./mocks/browser");
 worker.start({ onUnhandledRequest: "bypass" });
 // }
+
+axios.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response) {
+      const { status } = error.response;
+      if (status === 401 || status === 403) {
+        alert(`Received HTTP ${status}: ${error.response.data.message}`);
+      }
+    }
+    return Promise.reject(error);
+  }
+);
 
 const container = document.getElementById("app");
 // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
