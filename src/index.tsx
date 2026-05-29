@@ -7,7 +7,6 @@ import { BrowserRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "react-query";
 import { ReactQueryDevtools } from "react-query/devtools";
 import { theme } from "~/theme";
-import { worker } from "./mocks/browser";
 import axios from "axios";
 
 const queryClient = new QueryClient({
@@ -16,10 +15,10 @@ const queryClient = new QueryClient({
   },
 });
 
-// if (import.meta.env.DEV) {
-//   const { worker } = await import("./mocks/browser");
-worker.start({ onUnhandledRequest: "bypass" });
-// }
+if (import.meta.env.DEV) {
+  const { worker } = await import("./mocks/browser");
+  worker.start({ onUnhandledRequest: "bypass" });
+}
 
 axios.interceptors.response.use(
   (response) => response,
