@@ -25,4 +25,12 @@ export abstract class BaseStack extends cdk.Stack {
   protected resourceName(name: string): string {
     return `${this.resourcePrefix}-${name}`;
   }
+
+  /**
+   * Whether this is the production environment. Used to decide data-retention
+   * defaults (e.g. keep vs. destroy stateful resources on stack deletion).
+   */
+  protected get isProduction(): boolean {
+    return this.stage === "prod";
+  }
 }

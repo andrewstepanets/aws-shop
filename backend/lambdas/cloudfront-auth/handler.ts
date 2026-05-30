@@ -1,12 +1,11 @@
+import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { createPublicKey, JsonWebKey, verify } from "node:crypto";
 import { request as httpsRequest } from "node:https";
 import { URLSearchParams } from "node:url";
 
-declare const AUTH_AWS_REGION: string;
-declare const AUTH_COGNITO_DOMAIN_PREFIX: string;
-declare const AUTH_COGNITO_USER_POOL_ID: string;
-declare const AUTH_COGNITO_CLIENT_ID: string;
-declare const AUTH_WEB_APP_URL: string;
+// Injected at build time (static values only — no dependency on deployed stack outputs).
+declare const AUTH_CONFIG_PARAM_NAME: string;
+declare const AUTH_CONFIG_REGION: string;
 
 interface CloudFrontHeader {
   key?: string;
@@ -44,25 +43,39 @@ interface TokenResponse {
   token_type: string;
 }
 
-const region = AUTH_AWS_REGION;
-const domainPrefix = AUTH_COGNITO_DOMAIN_PREFIX;
-const userPoolId = AUTH_COGNITO_USER_POOL_ID;
-const clientId = AUTH_COGNITO_CLIENT_ID;
-const webAppUrl = AUTH_WEB_APP_URL.replace(/\/$/, "");
-const cognitoDomain = `${domainPrefix}.auth.${region}.amazoncognito.com`;
-const issuer = `https://cognito-idp.${region}.amazonaws.com/${userPoolId}`;
-const redirectUri = webAppUrl;
-const authorizePath = "/oauth2/authorize";
-const tokenPath = "/oauth2/token";
+// Cognito configuration resolved at runtime from SSM (Lambda@Edge has no env vars).
+interface AuthConfig {
+  clientId: string;
+  domainPrefix: string;
+  region: string;
+  userPoolId: string;
+}
 
+// Per-request derived values (web app URL comes from the incoming Host header).
+interface AuthContext {
+  authorizeUrl: string;
+  clientId: string;
+  cognitoDomain: string;
+  issuer: string;
+  jwksHost: string;
+  redirectUri: string;
+  region: string;
+  userPoolId: string;
+  webAppUrl: string;
+}
+
+const ssmClient = new SSMClient({ region: AUTH_CONFIG_REGION });
+
+let configCache: AuthConfig | undefined;
 let jwksCache: Jwk[] | undefined;
 
 export const handler = async (event: CloudFrontEvent) => {
   const request = event.Records[0].cf.request;
+  const ctx = await buildContext(request);
   const cookies = parseCookies(request.headers.cookie?.[0]?.value ?? "");
   const idToken = cookies.id_token;
 
-  if (idToken && (await isValidIdToken(idToken))) {
+  if (idToken && (await isValidIdToken(idToken, ctx))) {
     return request;
   }
 
@@ -70,19 +83,57 @@ export const handler = async (event: CloudFrontEvent) => {
   const code = query.get("code");
 
   if (code) {
-    return handleCodeCallback(request, code, query.get("state"));
+    return handleCodeCallback(request, code, query.get("state"), ctx);
   }
 
-  return redirectToHostedUi(request);
+  return redirectToHostedUi(request, ctx);
+};
+
+const loadConfig = async (): Promise<AuthConfig> => {
+  if (configCache) {
+    return configCache;
+  }
+
+  const response = await ssmClient.send(
+    new GetParameterCommand({ Name: AUTH_CONFIG_PARAM_NAME })
+  );
+  const value = response.Parameter?.Value;
+
+  if (!value) {
+    throw new Error(`Auth config parameter ${AUTH_CONFIG_PARAM_NAME} is empty`);
+  }
+
+  configCache = JSON.parse(value) as AuthConfig;
+  return configCache;
+};
+
+const buildContext = async (request: CloudFrontRequest): Promise<AuthContext> => {
+  const config = await loadConfig();
+  const host = request.headers.host?.[0]?.value ?? "";
+  const webAppUrl = `https://${host}`.replace(/\/$/, "");
+  const cognitoDomain = `${config.domainPrefix}.auth.${config.region}.amazoncognito.com`;
+
+  return {
+    authorizeUrl: `https://${cognitoDomain}/oauth2/authorize`,
+    clientId: config.clientId,
+    cognitoDomain,
+    issuer: `https://cognito-idp.${config.region}.amazonaws.com/${config.userPoolId}`,
+    jwksHost: `cognito-idp.${config.region}.amazonaws.com`,
+    redirectUri: webAppUrl,
+    region: config.region,
+    userPoolId: config.userPoolId,
+    webAppUrl,
+  };
 };
 
 const handleCodeCallback = async (
   request: CloudFrontRequest,
   code: string,
-  state: string | null
+  state: string | null,
+  ctx: AuthContext
 ) => {
   try {
-    const tokenResponse = await exchangeCodeForTokens(code);
+    const tokenResponse = await exchangeCodeForTokens(code, ctx);
     const cleanPath = getRedirectPathFromState(state) ?? request.uri;
     const maxAge = getTokenMaxAge(tokenResponse.id_token, tokenResponse.expires_in);
 
@@ -90,7 +141,7 @@ const handleCodeCallback = async (
       status: "302",
       statusDescription: "Found",
       headers: {
-        location: [{ key: "Location", value: `${webAppUrl}${cleanPath}` }],
+        location: [{ key: "Location", value: `${ctx.webAppUrl}${cleanPath}` }],
         "set-cookie": [
           {
             key: "Set-Cookie",
@@ -104,15 +155,15 @@ const handleCodeCallback = async (
       },
     };
   } catch {
-    return redirectToHostedUi(request);
+    return redirectToHostedUi(request, ctx);
   }
 };
 
-const redirectToHostedUi = (request: CloudFrontRequest) => {
+const redirectToHostedUi = (request: CloudFrontRequest, ctx: AuthContext) => {
   const state = base64UrlEncode(request.uri);
   const params = new URLSearchParams({
-    client_id: clientId,
-    redirect_uri: redirectUri,
+    client_id: ctx.clientId,
+    redirect_uri: ctx.redirectUri,
     response_type: "code",
     scope: "openid email profile",
     state,
@@ -125,25 +176,25 @@ const redirectToHostedUi = (request: CloudFrontRequest) => {
       location: [
         {
           key: "Location",
-          value: `https://${cognitoDomain}${authorizePath}?${params.toString()}`,
+          value: `${ctx.authorizeUrl}?${params.toString()}`,
         },
       ],
     },
   };
 };
 
-const exchangeCodeForTokens = (code: string): Promise<TokenResponse> => {
+const exchangeCodeForTokens = (code: string, ctx: AuthContext): Promise<TokenResponse> => {
   const body = new URLSearchParams({
-    client_id: clientId,
+    client_id: ctx.clientId,
     code,
     grant_type: "authorization_code",
-    redirect_uri: redirectUri,
+    redirect_uri: ctx.redirectUri,
   }).toString();
 
-  return postJson<TokenResponse>(cognitoDomain, tokenPath, body);
+  return postJson<TokenResponse>(ctx.cognitoDomain, "/oauth2/token", body);
 };
 
-const isValidIdToken = async (token: string): Promise<boolean> => {
+const isValidIdToken = async (token: string, ctx: AuthContext): Promise<boolean> => {
   const parts = token.split(".");
 
   if (parts.length !== 3) {
@@ -161,15 +212,15 @@ const isValidIdToken = async (token: string): Promise<boolean> => {
 
   if (
     header.alg !== "RS256" ||
-    payload.iss !== issuer ||
-    payload.aud !== clientId ||
+    payload.iss !== ctx.issuer ||
+    payload.aud !== ctx.clientId ||
     payload.token_use !== "id" ||
     payload.exp <= Math.floor(Date.now() / 1000)
   ) {
     return false;
   }
 
-  const jwk = (await getJwks()).find((key) => key.kid === header.kid);
+  const jwk = await findJwk(header.kid, ctx);
 
   if (!jwk) {
     return false;
@@ -183,14 +234,26 @@ const isValidIdToken = async (token: string): Promise<boolean> => {
   );
 };
 
-const getJwks = async (): Promise<Jwk[]> => {
+const findJwk = async (kid: string, ctx: AuthContext): Promise<Jwk | undefined> => {
+  const cached = (await getJwks(ctx)).find((key) => key.kid === kid);
+
+  if (cached) {
+    return cached;
+  }
+
+  // Cognito may have rotated its signing keys — refetch once before giving up.
+  jwksCache = undefined;
+  return (await getJwks(ctx)).find((key) => key.kid === kid);
+};
+
+const getJwks = async (ctx: AuthContext): Promise<Jwk[]> => {
   if (jwksCache) {
     return jwksCache;
   }
 
   const response = await getJson<{ keys: Jwk[] }>(
-    `cognito-idp.${region}.amazonaws.com`,
-    `/${userPoolId}/.well-known/jwks.json`
+    ctx.jwksHost,
+    `/${ctx.userPoolId}/.well-known/jwks.json`
   );
 
   jwksCache = response.keys;

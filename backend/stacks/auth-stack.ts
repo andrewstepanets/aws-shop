@@ -9,8 +9,10 @@ import {
   UserPoolDomain,
   VerificationEmailStyle,
 } from "aws-cdk-lib/aws-cognito";
+import { StringParameter } from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 import { BaseStack, BaseStackProps } from "../lib/base-stack";
+import { authConfigParameterName } from "../lib/auth-config";
 
 export interface AuthStackProps extends BaseStackProps {
   callbackUrls: string[];
@@ -76,6 +78,20 @@ export class AuthStack extends BaseStack {
         domainPrefix: props.cognitoDomainPrefix,
       },
       managedLoginVersion: ManagedLoginVersion.CLASSIC_HOSTED_UI,
+    });
+
+    // Runtime configuration for the CloudFront auth Lambda@Edge function.
+    // Lambda@Edge has no environment variables, so the edge function reads this
+    // at runtime instead of having the values baked in at build time. This keeps
+    // the storage stack independent of this stack's outputs and avoids a deploy cycle.
+    new StringParameter(this, "WebAppAuthConfig", {
+      parameterName: authConfigParameterName(this.projectName, this.stage),
+      stringValue: cdk.Stack.of(this).toJsonString({
+        clientId: this.userPoolClient.userPoolClientId,
+        domainPrefix: props.cognitoDomainPrefix,
+        region: this.region,
+        userPoolId: this.userPool.userPoolId,
+      }),
     });
 
     new cdk.CfnOutput(this, "UserPoolId", {
