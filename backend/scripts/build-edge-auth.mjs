@@ -28,12 +28,12 @@ await build({
     AUTH_CONFIG_REGION: JSON.stringify(getEnv("AWS_REGION")),
   },
   entryPoints: ["lambdas/cloudfront-auth/handler.ts"],
-  // Provided by the Lambda Node.js 20 runtime — no need to bundle.
+  // Provided by the Lambda Node.js 22 runtime — no need to bundle.
   external: ["@aws-sdk/*", "aws-sdk"],
   format: "cjs",
   logLevel: "info",
   minify: true,
   outfile: "dist/lambdas/cloudfront-auth/index.js",
   platform: "node",
-  target: "node20",
+  target: "node22",
 });

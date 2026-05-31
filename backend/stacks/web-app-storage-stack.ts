@@ -38,7 +38,7 @@ export class WebAppStorageStack extends BaseStack {
     const authEdgeFunction = new experimental.EdgeFunction(this, "WebAppAuthEdgeFunction", {
       code: Code.fromAsset(path.join(__dirname, "../dist/lambdas/cloudfront-auth")),
       handler: "index.handler",
-      runtime: Runtime.NODEJS_20_X,
+      runtime: Runtime.NODEJS_22_X,
       stackId: `${props.projectName}-${props.stage}-web-app-auth-edge`,
     });
 

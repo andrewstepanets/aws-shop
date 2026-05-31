@@ -1,0 +1,56 @@
+name: Deploy dev
+
+# Deploys to the dev environment on every push to main (i.e. after a PR merges).
+on:
+  push:
+    branches: [main]
+
+# Never run two dev deploys at once; let an in-flight one finish.
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-1
+  PROJECT_NAME: aws-shop
+  STAGE: dev
+  COGNITO_DOMAIN_PREFIX: aws-shop-dev-login
+
+jobs:
+  deploy:
+    name: Build + deploy (dev)
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build backend
+        working-directory: backend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: cdk deploy
+        working-directory: backend
+        run: npx cdk deploy --all --require-approval never

@@ -1,0 +1,89 @@
+name: PR checks
+
+# Runs on every pull request targeting main. Validates the code and previews the
+# infrastructure change (cdk diff) WITHOUT deploying anything.
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: eu-west-1
+  PROJECT_NAME: aws-shop
+
+jobs:
+  frontend:
+    name: Frontend (lint + test + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npx eslint --ignore-path .gitignore src
+
+      - name: Unit tests
+        run: npx vitest run
+
+      - name: Build
+        run: npm run build
+
+  backend-diff:
+    name: Backend (build + cdk diff)
+    runs-on: ubuntu-latest
+    # OIDC: assume the AWS deploy role with a short-lived token, no stored secrets.
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      STAGE: dev
+      COGNITO_DOMAIN_PREFIX: aws-shop-dev-login
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      # The frontend build output (dist/) is uploaded by the CDK BucketDeployment,
+      # so it must exist before synth/diff.
+      - name: Build frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build backend
+        working-directory: backend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: cdk diff
+        working-directory: backend
+        run: |
+          npx cdk diff --all 2>&1 | tee /tmp/cdk-diff.txt
+          {
+            echo '### cdk diff (stage: dev)';
+            echo '```';
+            cat /tmp/cdk-diff.txt;
+            echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"
